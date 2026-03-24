@@ -49,8 +49,10 @@ if ! restic cat config > /dev/null 2>&1; then
     ATTEMPT=0
     while [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; do
         ATTEMPT=$((ATTEMPT + 1))
-        if restic init 2>&1; then
-            echo "$LOG Repository initialized"
+        INIT_OUTPUT=$(restic init 2>&1) && { echo "$LOG Repository initialized"; break; }
+        # Repository already exists but cat config failed (e.g. transient error)
+        if echo "$INIT_OUTPUT" | grep -q "already contains keys\|already initialized\|config already exists"; then
+            echo "$LOG Repository already initialized"
             break
         fi
         if [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; then

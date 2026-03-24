@@ -381,12 +381,9 @@ jobs:
           # Failing target should have no snapshot
           ! docker exec error-test restore.sh -t failing-hook 2>&1 | grep -q "failing-hook"
 
-      - name: "errors: verify unhealthy status on failure"
+      - name: "errors: verify FAIL written to status file"
         run: |
-          sleep 5
-          STATUS=$(docker inspect --format='{{.State.Health.Status}}' error-test)
-          echo "Health status: $STATUS"
-          [ "$STATUS" = "unhealthy" ]
+          docker exec error-test cat /var/run/docker-backup/last-run | grep -q "FAIL"
 
       - name: "errors: cleanup"
         if: always()

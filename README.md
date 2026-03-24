@@ -10,13 +10,26 @@ Docker container for backing up volumes and mount points using [restic](https://
 - **Pre/post hooks** for safe database backups (e.g., SQLite `.backup`)
 - **Cron scheduling** with configurable expressions
 - **Retention policies** (daily/weekly/monthly/yearly)
+- **Repository integrity verification** (periodic `restic check`)
+- **Staleness detection** — healthcheck catches stopped/stale backups
+- **Backup history log** with duration, size, and per-target details
+- **Dry run mode** to preview what would be backed up
 - **Notifications** on failure (webhook, Gotify)
-- **Docker healthcheck** based on last backup status
+- **Docker healthcheck** based on last backup status and staleness
 
 ## Quick start
 
-1. Create `config.yml` based on `config.example.yml`
-2. Set up rclone config: `rclone config` → save as `rclone.conf`
+1. Set up rclone (for cloud storage):
+
+```bash
+docker run --rm -it \
+  --entrypoint setup-rclone.sh \
+  -v /opt/homelab/config/backup:/config \
+  ghcr.io/krbob/docker-backup:latest
+```
+
+2. Create `config.yml` based on `config.example.yml`
+
 3. Run:
 
 ```bash
@@ -47,45 +60,84 @@ targets:
 
 Use `pre_hook` with `sqlite3 .backup` to create a consistent copy before backup. The container includes `sqlite3` for this purpose. Note: the volume needs read-write access for the safe copy.
 
+### Repository verification
+
+By default, `restic check` runs weekly (Sunday 04:00) to verify repository integrity. Configure or disable:
+
+```yaml
+verify:
+  enabled: false
+  # schedule: "0 4 * * 0"
+```
+
 ## Restore
 
 Exec into the container and use the restore helper:
 
 ```bash
 # List all snapshots
-docker exec docker-backup restore.sh
+docker exec backup restore.sh
 
 # List snapshots for a specific target
-docker exec docker-backup restore.sh -t my-app
+docker exec backup restore.sh -t my-app
 
 # List files in a snapshot
-docker exec docker-backup restore.sh -t my-app -s latest -l
+docker exec backup restore.sh -t my-app -s latest -l
 
 # Restore latest snapshot to /restore/my-app
-docker exec docker-backup restore.sh -t my-app -s latest
+docker exec backup restore.sh -t my-app -s latest
 
 # Restore to a custom path
-docker exec docker-backup restore.sh -t my-app -s latest -d /custom/path
+docker exec backup restore.sh -t my-app -s latest -d /custom/path
 ```
 
 Then copy the restored files where needed:
 
 ```bash
-docker cp docker-backup:/restore/my-app ./restored-data
+docker cp backup:/restore/my-app/data/my-app/. /opt/homelab/data/my-app/
 ```
 
 ## Manual backup
 
-Trigger a backup outside of the cron schedule:
+```bash
+docker exec backup backup.sh
+```
+
+## Dry run
+
+Preview what would be backed up without making changes:
 
 ```bash
-docker exec docker-backup backup.sh
+docker exec backup backup.sh --dry-run
+```
+
+## Status
+
+View backup status, history, and repository info:
+
+```bash
+docker exec backup status.sh
 ```
 
 ## Health check
 
-The container reports healthy/unhealthy based on the last backup result. Check with:
+The container reports unhealthy when:
+- The last backup failed
+- No backup has run for 2x the scheduled interval (staleness detection)
 
 ```bash
-docker inspect --format='{{.State.Health.Status}}' docker-backup
+docker inspect --format='{{.State.Health.Status}}' backup
 ```
+
+## Rclone setup
+
+Interactive helper for configuring cloud storage remotes:
+
+```bash
+docker run --rm -it \
+  --entrypoint setup-rclone.sh \
+  -v /opt/homelab/config/backup:/config \
+  ghcr.io/krbob/docker-backup:latest
+```
+
+This avoids the bind-mount rename issues that occur with `rclone config` directly.

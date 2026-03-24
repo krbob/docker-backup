@@ -391,6 +391,170 @@ jobs:
           docker stop error-test || true
           docker volume rm error-data error-repo || true
 
+      # ── Dry run ──
+
+      - name: "dry-run: setup"
+        run: |
+          docker volume create dryrun-data
+          docker run --rm -v dryrun-data:/data alpine sh -c 'echo "test" > /data/file.txt'
+
+          cat > /tmp/dryrun-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "dryrun-test"
+              path: "/data/test"
+          EOF
+
+          docker run -d \
+            -v /tmp/dryrun-config.yml:/config/backup.yml:ro \
+            -v dryrun-data:/data/test:ro \
+            -v dryrun-repo:/backups \
+            --name dryrun-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "dry-run: verify no snapshot created"
+        run: |
+          OUTPUT=$(docker exec dryrun-test backup.sh --dry-run 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "DRY RUN"
+          # No snapshots should exist
+          SNAPSHOTS=$(docker exec dryrun-test restore.sh 2>&1 | grep "dryrun-test" | wc -l)
+          [ "$SNAPSHOTS" -eq 0 ]
+
+      - name: "dry-run: cleanup"
+        if: always()
+        run: |
+          docker stop dryrun-test || true
+          docker volume rm dryrun-data dryrun-repo || true
+
+      # ── Verify (restic check) ──
+
+      - name: "verify: setup and run"
+        run: |
+          docker volume create verify-data
+          docker run --rm -v verify-data:/data alpine sh -c 'echo "test" > /data/file.txt'
+
+          cat > /tmp/verify-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "verify-test"
+              path: "/data/test"
+          EOF
+
+          docker run -d \
+            -v /tmp/verify-config.yml:/config/backup.yml:ro \
+            -v verify-data:/data/test:ro \
+            -v verify-repo:/backups \
+            --name verify-test \
+            docker-backup:test
+
+          sleep 5
+          docker exec verify-test backup.sh
+          OUTPUT=$(docker exec verify-test verify.sh 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "Repository integrity OK"
+
+      - name: "verify: cleanup"
+        if: always()
+        run: |
+          docker stop verify-test || true
+          docker volume rm verify-data verify-repo || true
+
+      # ── Status & history ──
+
+      - name: "status: setup and verify"
+        run: |
+          docker volume create status-data
+          docker run --rm -v status-data:/data alpine sh -c 'echo "test" > /data/file.txt'
+
+          cat > /tmp/status-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "status-test"
+              path: "/data/test"
+          EOF
+
+          docker run -d \
+            -v /tmp/status-config.yml:/config/backup.yml:ro \
+            -v status-data:/data/test:ro \
+            -v status-repo:/backups \
+            --name status-test \
+            docker-backup:test
+
+          sleep 5
+          docker exec status-test backup.sh
+          docker exec status-test backup.sh
+
+      - name: "status: verify status output"
+        run: |
+          OUTPUT=$(docker exec status-test status.sh 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "Backup Status"
+          echo "$OUTPUT" | grep -q "Last run: OK"
+          echo "$OUTPUT" | grep -q "Recent History"
+
+      - name: "status: verify history file"
+        run: |
+          LINES=$(docker exec status-test cat /var/log/docker-backup/history.jsonl | wc -l)
+          echo "History entries: $LINES"
+          [ "$LINES" -eq 2 ]
+          # Verify JSON structure
+          docker exec status-test cat /var/log/docker-backup/history.jsonl | while IFS= read -r line; do
+            echo "$line" | jq . > /dev/null
+          done
+
+      - name: "status: cleanup"
+        if: always()
+        run: |
+          docker stop status-test || true
+          docker volume rm status-data status-repo || true
+
+      # ── Init retry ──
+
+      - name: "init-retry: verify max retries on bad repo"
+        run: |
+          cat > /tmp/retry-config.yml << 'EOF'
+          repository:
+            location: "rclone:nonexistent:bucket/path"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "retry-test"
+              path: "/data/test"
+          EOF
+
+          # Container should fail init after retries and NOT restart endlessly
+          # S6_BEHAVIOUR_IF_STAGE2_FAILS=2 causes container to stop
+          OUTPUT=$(docker run --rm \
+            -v /tmp/retry-config.yml:/config/backup.yml:ro \
+            --name retry-test \
+            docker-backup:test 2>&1 || true)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "Failed to initialize repository after"
+
+      - name: "init-retry: cleanup"
+        if: always()
+        run: docker rm -f retry-test 2>/dev/null || true
+
   publish:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

@@ -5,12 +5,15 @@ ARG RESTIC_VERSION=0.18.1
 ARG RCLONE_VERSION=1.73.3
 ARG YQ_VERSION=4.52.4
 
+ENV S6_BEHAVIOUR_IF_STAGE2_FAILS=2
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bzip2 \
         ca-certificates \
         cron \
         curl \
         gettext-base \
+        jq \
         sqlite3 \
         tzdata \
         xz-utils \
@@ -47,6 +50,8 @@ RUN ARCH=$(dpkg --print-architecture) && \
         -o /usr/local/bin/yq && \
     chmod +x /usr/local/bin/yq
 
+RUN mkdir -p /var/log/docker-backup
+
 COPY config.example.yml /etc/docker-backup/config.example.yml
 COPY scripts/ /usr/local/bin/
 COPY etc/ /etc/
@@ -56,7 +61,6 @@ RUN chmod +x /usr/local/bin/*.sh \
     && chmod +x /etc/s6-overlay/s6-rc.d/cron/run
 
 HEALTHCHECK --interval=60s --timeout=10s --start-period=300s --retries=3 \
-    CMD [ -f /var/run/docker-backup/last-run ] && \
-        [ "$(cat /var/run/docker-backup/last-run | cut -d' ' -f1)" = "OK" ] || exit 1
+    CMD /usr/local/bin/healthcheck.sh
 
 ENTRYPOINT ["/init"]

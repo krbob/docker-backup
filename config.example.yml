@@ -24,6 +24,11 @@ retention:
   keep_monthly: 6
   keep_yearly: 2
 
+# Repository integrity verification (restic check)
+# verify:
+#   enabled: true                    # default: true
+#   schedule: "0 4 * * 0"           # default: weekly on Sunday at 04:00
+
 # Backup targets
 targets:
   - name: "appdata"

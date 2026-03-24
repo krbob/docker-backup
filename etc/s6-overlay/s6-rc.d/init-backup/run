@@ -5,16 +5,18 @@ CONFIG_SRC="/config/backup.yml"
 CONFIG_DIR="/run/docker-backup"
 CONFIG="${CONFIG_DIR}/config.yml"
 STATE_DIR="/var/run/docker-backup"
+LOG="[docker-backup]"
+MAX_RETRIES=3
 
-echo "[docker-backup] Initializing..."
+echo "$LOG Initializing..."
 
 # Create runtime directories
 mkdir -p "$CONFIG_DIR" "$STATE_DIR"
 
 # Validate config exists
 if [ ! -f "$CONFIG_SRC" ]; then
-    echo "[docker-backup] ERROR: Config file not found at ${CONFIG_SRC}"
-    echo "[docker-backup] Mount your config: -v ./config.yml:/config/backup.yml:ro"
+    echo "$LOG ERROR: Config file not found at ${CONFIG_SRC}"
+    echo "$LOG Mount your config: -v ./config.yml:/config/backup.yml:ro"
     exit 1
 fi
 
@@ -24,13 +26,13 @@ envsubst < "$CONFIG_SRC" > "$CONFIG"
 # Validate required fields
 REPO=$(yq '.repository.location' "$CONFIG")
 if [ "$REPO" = "null" ] || [ -z "$REPO" ]; then
-    echo "[docker-backup] ERROR: repository.location is required"
+    echo "$LOG ERROR: repository.location is required"
     exit 1
 fi
 
 TARGET_COUNT=$(yq '.targets | length' "$CONFIG")
 if [ "$TARGET_COUNT" -eq 0 ]; then
-    echo "[docker-backup] ERROR: At least one backup target is required"
+    echo "$LOG ERROR: At least one backup target is required"
     exit 1
 fi
 
@@ -41,19 +43,43 @@ export RESTIC_REPOSITORY="$REPO"
 RCLONE_CONFIG=$(yq '.rclone_config // "/config/rclone.conf"' "$CONFIG")
 export RCLONE_CONFIG
 
-# Initialize restic repository if needed
+# Initialize restic repository if needed (with retry + backoff)
 if ! restic cat config > /dev/null 2>&1; then
-    echo "[docker-backup] Initializing restic repository at ${REPO}..."
-    restic init
-    echo "[docker-backup] Repository initialized"
+    echo "$LOG Initializing restic repository at ${REPO}..."
+    ATTEMPT=0
+    while [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; do
+        ATTEMPT=$((ATTEMPT + 1))
+        if restic init 2>&1; then
+            echo "$LOG Repository initialized"
+            break
+        fi
+        if [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; then
+            WAIT=$((ATTEMPT * 10))
+            echo "$LOG Init failed (attempt ${ATTEMPT}/${MAX_RETRIES}), retrying in ${WAIT}s..."
+            sleep "$WAIT"
+        else
+            echo "$LOG ERROR: Failed to initialize repository after ${MAX_RETRIES} attempts"
+            exit 1
+        fi
+    done
 else
-    echo "[docker-backup] Repository already initialized"
+    echo "$LOG Repository already initialized"
 fi
 
 # Install cron schedule
 SCHEDULE=$(yq '.schedule // "0 3 * * *"' "$CONFIG")
-echo "${SCHEDULE} /usr/local/bin/backup.sh >> /proc/1/fd/1 2>&1" > /etc/cron.d/docker-backup
+CRON_LINE="${SCHEDULE} /usr/local/bin/backup.sh >> /proc/1/fd/1 2>&1"
+
+# Add weekly restic check if verify is enabled (default: true)
+VERIFY_ENABLED=$(yq '.verify.enabled // true' "$CONFIG")
+VERIFY_SCHEDULE=$(yq '.verify.schedule // "0 4 * * 0"' "$CONFIG")
+if [ "$VERIFY_ENABLED" = "true" ]; then
+    CRON_LINE="${CRON_LINE}
+${VERIFY_SCHEDULE} /usr/local/bin/verify.sh >> /proc/1/fd/1 2>&1"
+fi
+
+echo "$CRON_LINE" > /etc/cron.d/docker-backup
 chmod 0644 /etc/cron.d/docker-backup
 crontab /etc/cron.d/docker-backup
 
-echo "[docker-backup] Ready — ${TARGET_COUNT} target(s), schedule: ${SCHEDULE}, repo: ${REPO}"
+echo "$LOG Ready — ${TARGET_COUNT} target(s), schedule: ${SCHEDULE}, repo: ${REPO}"

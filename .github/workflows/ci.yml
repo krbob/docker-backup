@@ -15,13 +15,15 @@ jobs:
       - name: Build image
         run: docker build -t docker-backup:test .
 
-      - name: Create test config
-        run: |
-          mkdir -p /tmp/test-data
-          echo "hello backup" > /tmp/test-data/file1.txt
-          echo '{"key":"value"}' > /tmp/test-data/file2.json
+      # ── Basic backup & restore ──
 
-          cat > /tmp/config.yml << 'EOF'
+      - name: "basic: setup"
+        run: |
+          docker volume create basic-data
+          docker run --rm -v basic-data:/data alpine sh -c \
+            'echo "hello backup" > /data/file1.txt && echo "{\"key\":\"value\"}" > /data/file2.json'
+
+          cat > /tmp/basic-config.yml << 'EOF'
           repository:
             location: "/backups/restic-repo"
             password: "ci-test-password"
@@ -36,57 +38,361 @@ jobs:
               path: "/data/test"
           EOF
 
-      - name: Start container
-        run: |
-          docker volume create test-data
-          docker run --rm -v test-data:/data alpine sh -c \
-            'echo "hello backup" > /data/file1.txt && echo "{\"key\":\"value\"}" > /data/file2.json'
-
           docker run -d \
-            -v /tmp/config.yml:/config/backup.yml:ro \
-            -v test-data:/data/test:ro \
-            -v test-repo:/backups \
-            --name docker-backup-ci \
+            -v /tmp/basic-config.yml:/config/backup.yml:ro \
+            -v basic-data:/data/test:ro \
+            -v basic-repo:/backups \
+            --name basic-test \
             docker-backup:test
 
           sleep 5
-          docker logs docker-backup-ci
 
-      - name: Verify init
-        run: docker logs docker-backup-ci 2>&1 | grep -q "Ready —"
+      - name: "basic: verify init"
+        run: docker logs basic-test 2>&1 | grep -q "Ready —"
 
-      - name: Run backup
-        run: docker exec docker-backup-ci backup.sh
+      - name: "basic: run backup"
+        run: docker exec basic-test backup.sh 2>&1 | tee /tmp/basic-backup.log
 
-      - name: Verify snapshot exists
+      - name: "basic: verify snapshot"
+        run: docker exec basic-test restore.sh | grep -q "test-data"
+
+      - name: "basic: verify file listing"
+        run: docker exec basic-test restore.sh -t test-data -s latest -l | grep -q "file1.txt"
+
+      - name: "basic: restore and verify content"
         run: |
-          docker exec docker-backup-ci restore.sh | grep -q "test-data"
+          docker exec basic-test restore.sh -t test-data -s latest
+          docker exec basic-test cat /restore/test-data/data/test/file1.txt | grep -q "hello backup"
+          docker exec basic-test cat /restore/test-data/data/test/file2.json | grep -q '{"key":"value"}'
 
-      - name: Verify file listing
-        run: |
-          docker exec docker-backup-ci restore.sh -t test-data -s latest -l | grep -q "file1.txt"
-
-      - name: Test restore
-        run: |
-          docker exec docker-backup-ci restore.sh -t test-data -s latest
-          docker exec docker-backup-ci cat /restore/test-data/data/test/file1.txt | grep -q "hello backup"
-
-      - name: Verify healthcheck
+      - name: "basic: verify healthcheck"
         run: |
           sleep 5
-          docker inspect --format='{{.State.Health.Status}}' docker-backup-ci | grep -q "healthy"
+          STATUS=$(docker inspect --format='{{.State.Health.Status}}' basic-test)
+          echo "Health status: $STATUS"
+          [ "$STATUS" = "healthy" ]
 
-      - name: Run second backup (incremental)
+      - name: "basic: incremental backup"
         run: |
-          docker exec docker-backup-ci backup.sh
-          SNAPSHOTS=$(docker exec docker-backup-ci restore.sh 2>&1 | grep "test-data" | wc -l)
+          docker exec basic-test backup.sh
+          SNAPSHOTS=$(docker exec basic-test restore.sh 2>&1 | grep "test-data" | wc -l)
+          echo "Snapshot count: $SNAPSHOTS"
           [ "$SNAPSHOTS" -eq 2 ]
 
-      - name: Cleanup
+      - name: "basic: cleanup"
         if: always()
         run: |
-          docker stop docker-backup-ci || true
-          docker volume rm test-data test-repo || true
+          docker stop basic-test || true
+          docker volume rm basic-data basic-repo || true
+
+      # ── Excludes ──
+
+      - name: "excludes: setup"
+        run: |
+          docker volume create exclude-data
+          docker run --rm -v exclude-data:/data alpine sh -c \
+            'echo "keep" > /data/important.txt && \
+             echo "skip" > /data/temp.tmp && \
+             mkdir -p /data/cache && echo "cached" > /data/cache/item.dat'
+
+          cat > /tmp/exclude-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "exclude-test"
+              path: "/data/test"
+              exclude:
+                - "*.tmp"
+                - "cache/"
+          EOF
+
+          docker run -d \
+            -v /tmp/exclude-config.yml:/config/backup.yml:ro \
+            -v exclude-data:/data/test:ro \
+            -v exclude-repo:/backups \
+            --name exclude-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "excludes: backup and verify"
+        run: |
+          docker exec exclude-test backup.sh
+          FILES=$(docker exec exclude-test restore.sh -t exclude-test -s latest -l)
+          echo "$FILES"
+          echo "$FILES" | grep -q "important.txt"
+          ! echo "$FILES" | grep -q "temp.tmp"
+          ! echo "$FILES" | grep -q "cache/item.dat"
+
+      - name: "excludes: cleanup"
+        if: always()
+        run: |
+          docker stop exclude-test || true
+          docker volume rm exclude-data exclude-repo || true
+
+      # ── Pre/post hooks ──
+
+      - name: "hooks: setup"
+        run: |
+          docker volume create hook-data
+          docker run --rm -v hook-data:/data alpine sh -c \
+            'echo "original" > /data/source.txt'
+
+          cat > /tmp/hook-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "hook-test"
+              path: "/data/test"
+              pre_hook: "cp /data/test/source.txt /data/test/prepared.txt"
+              backup_path: "/data/test/prepared.txt"
+              post_hook: "rm -f /data/test/prepared.txt"
+          EOF
+
+          docker run -d \
+            -v /tmp/hook-config.yml:/config/backup.yml:ro \
+            -v hook-data:/data/test \
+            -v hook-repo:/backups \
+            --name hook-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "hooks: backup with pre/post hook"
+        run: |
+          docker exec hook-test backup.sh
+          # Verify backup contains prepared.txt (from pre_hook + backup_path)
+          FILES=$(docker exec hook-test restore.sh -t hook-test -s latest -l)
+          echo "$FILES"
+          echo "$FILES" | grep -q "prepared.txt"
+          # Verify post_hook cleaned up
+          docker exec hook-test test ! -f /data/test/prepared.txt
+
+      - name: "hooks: restore and verify content"
+        run: |
+          docker exec hook-test restore.sh -t hook-test -s latest
+          docker exec hook-test cat /restore/hook-test/data/test/prepared.txt | grep -q "original"
+
+      - name: "hooks: cleanup"
+        if: always()
+        run: |
+          docker stop hook-test || true
+          docker volume rm hook-data hook-repo || true
+
+      # ── SQLite hook ──
+
+      - name: "sqlite: setup"
+        run: |
+          docker volume create sqlite-data
+          docker run --rm -v sqlite-data:/data alpine sh -c \
+            'apk add --no-cache sqlite && \
+             sqlite3 /data/app.db "CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO items VALUES(1, '\''test-item'\'');"'
+
+          cat > /tmp/sqlite-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "sqlite-test"
+              path: "/data/test"
+              pre_hook: "sqlite3 /data/test/app.db '.backup /data/test/app-safe.db'"
+              backup_path: "/data/test/app-safe.db"
+              post_hook: "rm -f /data/test/app-safe.db"
+          EOF
+
+          docker run -d \
+            -v /tmp/sqlite-config.yml:/config/backup.yml:ro \
+            -v sqlite-data:/data/test \
+            -v sqlite-repo:/backups \
+            --name sqlite-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "sqlite: backup database"
+        run: docker exec sqlite-test backup.sh
+
+      - name: "sqlite: restore and verify data"
+        run: |
+          docker exec sqlite-test restore.sh -t sqlite-test -s latest
+          RESULT=$(docker exec sqlite-test sqlite3 /restore/sqlite-test/data/test/app-safe.db "SELECT name FROM items WHERE id=1;")
+          echo "Restored value: $RESULT"
+          [ "$RESULT" = "test-item" ]
+
+      - name: "sqlite: cleanup"
+        if: always()
+        run: |
+          docker stop sqlite-test || true
+          docker volume rm sqlite-data sqlite-repo || true
+
+      # ── Multiple targets with selective restore ──
+
+      - name: "multi-target: setup"
+        run: |
+          docker volume create multi-app1
+          docker volume create multi-app2
+          docker run --rm -v multi-app1:/data alpine sh -c 'echo "app1-data" > /data/app1.txt'
+          docker run --rm -v multi-app2:/data alpine sh -c 'echo "app2-data" > /data/app2.txt'
+
+          cat > /tmp/multi-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "app1"
+              path: "/data/app1"
+            - name: "app2"
+              path: "/data/app2"
+          EOF
+
+          docker run -d \
+            -v /tmp/multi-config.yml:/config/backup.yml:ro \
+            -v multi-app1:/data/app1:ro \
+            -v multi-app2:/data/app2:ro \
+            -v multi-repo:/backups \
+            --name multi-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "multi-target: backup both"
+        run: docker exec multi-test backup.sh
+
+      - name: "multi-target: verify separate tags"
+        run: |
+          docker exec multi-test restore.sh -t app1 | grep -q "app1"
+          docker exec multi-test restore.sh -t app2 | grep -q "app2"
+
+      - name: "multi-target: selective restore app1 only"
+        run: |
+          docker exec multi-test restore.sh -t app1 -s latest
+          docker exec multi-test cat /restore/app1/data/app1/app1.txt | grep -q "app1-data"
+          # app2 should not be in app1's restore
+          ! docker exec multi-test test -f /restore/app1/data/app2/app2.txt
+
+      - name: "multi-target: cleanup"
+        if: always()
+        run: |
+          docker stop multi-test || true
+          docker volume rm multi-app1 multi-app2 multi-repo || true
+
+      # ── Retention pruning ──
+
+      - name: "retention: setup"
+        run: |
+          docker volume create retention-data
+          docker run --rm -v retention-data:/data alpine sh -c 'echo "data" > /data/file.txt'
+
+          cat > /tmp/retention-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 2
+            keep_weekly: 0
+            keep_monthly: 0
+            keep_yearly: 0
+          targets:
+            - name: "retention-test"
+              path: "/data/test"
+          EOF
+
+          docker run -d \
+            -v /tmp/retention-config.yml:/config/backup.yml:ro \
+            -v retention-data:/data/test:ro \
+            -v retention-repo:/backups \
+            --name retention-test \
+            docker-backup:test
+
+          sleep 5
+
+      - name: "retention: create 3 backups, verify pruning to 2"
+        run: |
+          docker exec retention-test backup.sh
+          docker exec retention-test backup.sh
+          docker exec retention-test backup.sh
+          SNAPSHOTS=$(docker exec retention-test restore.sh 2>&1 | grep "retention-test" | wc -l)
+          echo "Snapshots after pruning: $SNAPSHOTS"
+          [ "$SNAPSHOTS" -le 2 ]
+
+      - name: "retention: cleanup"
+        if: always()
+        run: |
+          docker stop retention-test || true
+          docker volume rm retention-data retention-repo || true
+
+      # ── Error handling ──
+
+      - name: "errors: failing pre-hook skips target but continues"
+        run: |
+          docker volume create error-data
+          docker run --rm -v error-data:/data alpine sh -c \
+            'echo "good" > /data/file.txt'
+
+          cat > /tmp/error-config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+          targets:
+            - name: "failing-hook"
+              path: "/data/test"
+              pre_hook: "false"
+            - name: "good-target"
+              path: "/data/test"
+          EOF
+
+          docker run -d \
+            -v /tmp/error-config.yml:/config/backup.yml:ro \
+            -v error-data:/data/test:ro \
+            -v error-repo:/backups \
+            --name error-test \
+            docker-backup:test
+
+          sleep 5
+
+          OUTPUT=$(docker exec error-test backup.sh 2>&1)
+          echo "$OUTPUT"
+
+          # Should report errors
+          echo "$OUTPUT" | grep -q "Pre-hook failed"
+          echo "$OUTPUT" | grep -q "Backup completed with errors"
+
+          # Good target should still be backed up
+          docker exec error-test restore.sh -t good-target | grep -q "good-target"
+
+          # Failing target should have no snapshot
+          ! docker exec error-test restore.sh -t failing-hook 2>&1 | grep -q "failing-hook"
+
+      - name: "errors: verify unhealthy status on failure"
+        run: |
+          sleep 5
+          STATUS=$(docker inspect --format='{{.State.Health.Status}}' error-test)
+          echo "Health status: $STATUS"
+          [ "$STATUS" = "unhealthy" ]
+
+      - name: "errors: cleanup"
+        if: always()
+        run: |
+          docker stop error-test || true
+          docker volume rm error-data error-repo || true
 
   publish:
     needs: test

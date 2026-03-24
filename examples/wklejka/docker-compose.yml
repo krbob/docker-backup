@@ -1,0 +1,12 @@
+services:
+  docker-backup:
+    container_name: docker-backup
+    image: ghcr.io/krbob/docker-backup:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Warsaw
+    volumes:
+      - /opt/homelab/config/backup/config.yml:/config/backup.yml:ro
+      - /opt/homelab/data/backup:/backups
+      - /opt/homelab/data/wklejka:/data/wklejka:ro

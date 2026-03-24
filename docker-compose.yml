@@ -1,0 +1,22 @@
+services:
+  docker-backup:
+    build: .
+    container_name: docker-backup
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Warsaw
+      RESTIC_PASSWORD: "${RESTIC_PASSWORD}"
+      # NOTIFY_WEBHOOK_URL: "${NOTIFY_WEBHOOK_URL}"
+    volumes:
+      - ./config.yml:/config/backup.yml:ro
+      - ./rclone.conf:/config/rclone.conf:ro
+      # Mount target volumes read-only
+      # - portfolio-backup-data:/data/portfolio-backups:ro
+      # - portfolio-sqlite-data:/data/portfolio-db:ro
+      # - other-app-data:/data/other-app:ro
+
+# volumes:
+#   portfolio-backup-data:
+#     external: true
+#   portfolio-sqlite-data:
+#     external: true

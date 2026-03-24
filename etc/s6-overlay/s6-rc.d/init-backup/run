@@ -1,0 +1,59 @@
+#!/command/with-contenv sh
+set -e
+
+CONFIG_SRC="/config/backup.yml"
+CONFIG_DIR="/run/docker-backup"
+CONFIG="${CONFIG_DIR}/config.yml"
+STATE_DIR="/var/run/docker-backup"
+
+echo "[docker-backup] Initializing..."
+
+# Create runtime directories
+mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+
+# Validate config exists
+if [ ! -f "$CONFIG_SRC" ]; then
+    echo "[docker-backup] ERROR: Config file not found at ${CONFIG_SRC}"
+    echo "[docker-backup] Mount your config: -v ./config.yml:/config/backup.yml:ro"
+    exit 1
+fi
+
+# Resolve environment variables in config
+envsubst < "$CONFIG_SRC" > "$CONFIG"
+
+# Validate required fields
+REPO=$(yq '.repository.location' "$CONFIG")
+if [ "$REPO" = "null" ] || [ -z "$REPO" ]; then
+    echo "[docker-backup] ERROR: repository.location is required"
+    exit 1
+fi
+
+TARGET_COUNT=$(yq '.targets | length' "$CONFIG")
+if [ "$TARGET_COUNT" -eq 0 ]; then
+    echo "[docker-backup] ERROR: At least one backup target is required"
+    exit 1
+fi
+
+# Set restic environment
+RESTIC_PASSWORD=$(yq '.repository.password' "$CONFIG")
+export RESTIC_PASSWORD
+export RESTIC_REPOSITORY="$REPO"
+RCLONE_CONFIG=$(yq '.rclone_config // "/config/rclone.conf"' "$CONFIG")
+export RCLONE_CONFIG
+
+# Initialize restic repository if needed
+if ! restic cat config > /dev/null 2>&1; then
+    echo "[docker-backup] Initializing restic repository at ${REPO}..."
+    restic init
+    echo "[docker-backup] Repository initialized"
+else
+    echo "[docker-backup] Repository already initialized"
+fi
+
+# Install cron schedule
+SCHEDULE=$(yq '.schedule // "0 3 * * *"' "$CONFIG")
+echo "${SCHEDULE} /usr/local/bin/backup.sh >> /proc/1/fd/1 2>&1" > /etc/cron.d/docker-backup
+chmod 0644 /etc/cron.d/docker-backup
+crontab /etc/cron.d/docker-backup
+
+echo "[docker-backup] Ready — ${TARGET_COUNT} target(s), schedule: ${SCHEDULE}, repo: ${REPO}"

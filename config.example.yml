@@ -1,0 +1,51 @@
+# docker-backup configuration
+# Mount this file into the container at /config/backup.yml
+
+# Restic repository location
+# Examples:
+#   /backups/restic-repo             local path (mounted volume)
+#   rclone:gdrive:backups/restic     Google Drive via rclone
+#   rclone:s3:bucket/restic          S3 via rclone
+#   rest:https://user:pass@host/     restic REST server
+repository:
+  location: "rclone:gdrive:backups/restic"
+  password: "${RESTIC_PASSWORD}"
+
+# Rclone config path (default: /config/rclone.conf)
+# rclone_config: /config/rclone.conf
+
+# Backup schedule (cron expression, default: daily at 03:00)
+schedule: "0 3 * * *"
+
+# Retention policy (maps to restic forget --keep-*)
+retention:
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 2
+
+# Backup targets
+targets:
+  - name: "appdata"
+    path: "/data/appdata"
+
+  - name: "wiki-db"
+    path: "/data/wiki"
+    pre_hook: "sqlite3 /data/wiki/db.sqlite3 '.backup /data/wiki/db-safe.sqlite3'"
+    backup_path: "/data/wiki/db-safe.sqlite3"
+    post_hook: "rm -f /data/wiki/db-safe.sqlite3"
+
+  - name: "photos"
+    path: "/data/photos"
+    exclude:
+      - "*.tmp"
+      - "thumbs/"
+
+# Notifications (optional)
+# notifications:
+#   on_failure: true
+#   on_success: false
+#   type: "webhook"           # webhook | gotify
+#   webhook_url: "${NOTIFY_WEBHOOK_URL}"
+#   gotify_url: "https://gotify.example.com"
+#   gotify_token: "${GOTIFY_TOKEN}"

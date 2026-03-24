@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t docker-backup:test .
+
+      - name: Create test config
+        run: |
+          mkdir -p /tmp/test-data
+          echo "hello backup" > /tmp/test-data/file1.txt
+          echo '{"key":"value"}' > /tmp/test-data/file2.json
+
+          cat > /tmp/config.yml << 'EOF'
+          repository:
+            location: "/backups/restic-repo"
+            password: "ci-test-password"
+          schedule: "0 3 * * *"
+          retention:
+            keep_daily: 7
+            keep_weekly: 4
+            keep_monthly: 6
+            keep_yearly: 2
+          targets:
+            - name: "test-data"
+              path: "/data/test"
+          EOF
+
+      - name: Start container
+        run: |
+          docker volume create test-data
+          docker run --rm -v test-data:/data alpine sh -c \
+            'echo "hello backup" > /data/file1.txt && echo "{\"key\":\"value\"}" > /data/file2.json'
+
+          docker run -d \
+            -v /tmp/config.yml:/config/backup.yml:ro \
+            -v test-data:/data/test:ro \
+            -v test-repo:/backups \
+            --name docker-backup-ci \
+            docker-backup:test
+
+          sleep 5
+          docker logs docker-backup-ci
+
+      - name: Verify init
+        run: docker logs docker-backup-ci 2>&1 | grep -q "Ready —"
+
+      - name: Run backup
+        run: docker exec docker-backup-ci backup.sh
+
+      - name: Verify snapshot exists
+        run: |
+          docker exec docker-backup-ci restore.sh | grep -q "test-data"
+
+      - name: Verify file listing
+        run: |
+          docker exec docker-backup-ci restore.sh -t test-data -s latest -l | grep -q "file1.txt"
+
+      - name: Test restore
+        run: |
+          docker exec docker-backup-ci restore.sh -t test-data -s latest
+          docker exec docker-backup-ci cat /restore/test-data/data/test/file1.txt | grep -q "hello backup"
+
+      - name: Verify healthcheck
+        run: |
+          sleep 5
+          docker inspect --format='{{.State.Health.Status}}' docker-backup-ci | grep -q "healthy"
+
+      - name: Run second backup (incremental)
+        run: |
+          docker exec docker-backup-ci backup.sh
+          SNAPSHOTS=$(docker exec docker-backup-ci restore.sh 2>&1 | grep "test-data" | wc -l)
+          [ "$SNAPSHOTS" -eq 2 ]
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop docker-backup-ci || true
+          docker volume rm test-data test-repo || true
+
+  publish:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:sha-${{ github.sha }}

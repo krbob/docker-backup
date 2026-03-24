@@ -135,6 +135,13 @@ elif [ "$FAIL" -eq 0 ]; then
     echo "OK $(date -Iseconds)" > "$STATUS_FILE"
     echo "$LOG Backup completed successfully (${DURATION}s)"
 
+    # Push heartbeat (e.g., Uptime Kuma push monitor)
+    PUSH_URL=$(yq '.notifications.push_url // ""' "$CONFIG")
+    if [ -n "$PUSH_URL" ] && [ "$PUSH_URL" != "null" ]; then
+        curl -sf "${PUSH_URL}?status=up&msg=OK&ping=${DURATION}" || \
+            echo "$LOG Push heartbeat failed"
+    fi
+
     NOTIFY_SUCCESS=$(yq '.notifications.on_success // false' "$CONFIG")
     if [ "$NOTIFY_SUCCESS" = "true" ]; then
         /usr/local/bin/notify.sh "Backup completed successfully (${DURATION}s)"
@@ -142,6 +149,13 @@ elif [ "$FAIL" -eq 0 ]; then
 else
     echo "FAIL $(date -Iseconds)" > "$STATUS_FILE"
     echo "$LOG Backup completed with errors (${DURATION}s)"
+
+    # Push failure heartbeat
+    PUSH_URL=$(yq '.notifications.push_url // ""' "$CONFIG")
+    if [ -n "$PUSH_URL" ] && [ "$PUSH_URL" != "null" ]; then
+        curl -sf "${PUSH_URL}?status=down&msg=Backup+failed&ping=${DURATION}" || \
+            echo "$LOG Push heartbeat failed"
+    fi
 
     NOTIFY_FAILURE=$(yq '.notifications.on_failure // false' "$CONFIG")
     if [ "$NOTIFY_FAILURE" = "true" ]; then

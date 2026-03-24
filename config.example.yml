@@ -48,6 +48,11 @@ targets:
 
 # Notifications (optional)
 # notifications:
+#   # Push heartbeat (e.g., Uptime Kuma push monitor)
+#   # Sends heartbeat after each backup — missing heartbeat = alert
+#   push_url: "${PUSH_URL}"
+#
+#   # Webhook/Gotify for immediate failure notifications
 #   on_failure: true
 #   on_success: false
 #   type: "webhook"           # webhook | gotify

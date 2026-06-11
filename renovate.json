@@ -5,7 +5,9 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["^Dockerfile$"],
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": ["ARG S6_OVERLAY_VERSION=(?<currentValue>\\S+)"],
       "depNameTemplate": "just-containers/s6-overlay",
       "datasourceTemplate": "github-releases",
@@ -13,7 +15,9 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^Dockerfile$"],
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": ["ARG RESTIC_VERSION=(?<currentValue>\\S+)"],
       "depNameTemplate": "restic/restic",
       "datasourceTemplate": "github-releases",
@@ -21,7 +25,9 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^Dockerfile$"],
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": ["ARG RCLONE_VERSION=(?<currentValue>\\S+)"],
       "depNameTemplate": "rclone/rclone",
       "datasourceTemplate": "github-releases",
@@ -29,7 +35,9 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^Dockerfile$"],
+      "managerFilePatterns": [
+        "/^Dockerfile$/"
+      ],
       "matchStrings": ["ARG YQ_VERSION=(?<currentValue>\\S+)"],
       "depNameTemplate": "mikefarah/yq",
       "datasourceTemplate": "github-releases",

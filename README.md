@@ -36,6 +36,44 @@ docker run --rm -it \
 RESTIC_PASSWORD=your-secret docker compose up -d
 ```
 
+### Local backup with Apple container
+
+On Apple silicon, mount a host directory as the source and another as the restic repository.
+For a trial restore, create `config/backup.yml` with this content:
+
+```yaml
+repository:
+  location: /repository
+  password: "${RESTIC_PASSWORD}"
+targets:
+  - name: sample
+    path: /data/sample
+```
+
+Run the following in the directory containing `config/`. Export `RESTIC_PASSWORD` in your shell
+and keep it for future restores. Use fresh `source`, `repository` and `restored` directories for the trial.
+
+```bash
+mkdir -p source repository restored
+printf 'backup test\n' > source/example.txt
+container system start
+container run -d --rm --name backup-test -e RESTIC_PASSWORD \
+  -v "$PWD/config:/config:ro" -v "$PWD/source:/data/sample:ro" \
+  -v "$PWD/repository:/repository" -v "$PWD/restored:/restore" ghcr.io/krbob/docker-backup:latest
+```
+
+Wait for the `Ready` message in `container logs backup-test`, then verify the round trip:
+
+```bash
+container exec backup-test backup.sh
+container exec backup-test restore.sh -t sample -s latest -d /restore
+cmp source/example.txt restored/data/sample/example.txt
+container stop backup-test
+```
+
+The repository and restored files remain on the Mac. To back up an existing Docker Desktop
+named volume, run the backup on the engine that owns it or export the data first.
+
 ## Configuration
 
 See [config.example.yml](config.example.yml) for all options.
